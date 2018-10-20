@@ -1,0 +1,9 @@
+*.pyc
+*/__pycache__/*
+/.env
+dump.rdb
+.DS_STORE
+/.vscode
+.DS_Store
+.cache-*
+.settings.json
