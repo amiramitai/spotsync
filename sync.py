@@ -27,6 +27,9 @@ except:
     settings['SPOTIPY_USERNAME'] = input('Username: ')
     json.dump(settings, open('settings.json', 'w'))
 
+if 'CACHE_TRACKS_FILENAME' in settings:
+    CACHE_TRACKS_FILENAME = settings['CACHE_TRACKS_FILENAME']
+
 os.environ.update(settings)
 
 scope = 'playlist-modify-public,user-follow-read'
