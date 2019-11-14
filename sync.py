@@ -28,7 +28,9 @@ except:
     json.dump(settings, open('settings.json', 'w'))
 
 if 'CACHE_TRACKS_FILENAME' in settings:
-    CACHE_TRACKS_FILENAME = settings['CACHE_TRACKS_FILENAME']
+    custom_cache_path = settings['CACHE_TRACKS_FILENAME']
+    print('[+] using custom cache path:', custom_cache_path)
+    CACHE_TRACKS_FILENAME = custom_cache_path
 
 os.environ.update(settings)
 
