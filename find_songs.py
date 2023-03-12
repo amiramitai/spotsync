@@ -11,51 +11,9 @@ import glob
 from datetime import datetime
 from multiprocessing.pool import ThreadPool
 
-import spotipy
-import spotipy.util as util
 
-
-CACHE_TRACKS_FILENAME = '.cache-tracks'
-CACHE_PL_FILENAME = '.cache-playlists'
-DAY_FRAME = 60  # how many days to look back
-
-
-
-def retry(func):
-    def wrapper(*args, **kwargs):
-        for i in range(5):
-            try:
-                return func(*args, **kwargs)
-            except:
-                # import traceback
-                # traceback.print_exc()
-                print('[+] sleeping: %d seconds' % (2.0 ** i))
-                time.sleep(2.0 ** i)
-    return wrapper
-
-try:
-    settings = json.load(open('settings.json', 'r'))
-except:
-    settings = {}
-    settings['SPOTIPY_CLIENT_ID'] = input('App Client ID: ')
-    settings['SPOTIPY_CLIENT_SECRET'] = input('App Client Secret: ')
-    settings['SPOTIPY_REDIRECT_URI'] = input('App redirect URI: ')
-    settings['SPOTIPY_USERNAME'] = input('Username: ')
-    json.dump(settings, open('settings.json', 'w'))
-
-if 'CACHE_TRACKS_FILENAME' in settings:
-    custom_cache_path = settings['CACHE_TRACKS_FILENAME']
-    print('[+] using custom cache path:', custom_cache_path)
-    CACHE_TRACKS_FILENAME = custom_cache_path
-
-os.environ.update(settings)
-
-scope = 'playlist-modify-public,user-follow-read'
-token = util.prompt_for_user_token(settings['SPOTIPY_USERNAME'], scope)
-
-if not token:
-    raise RuntimeError('no token')
-
+from common import *
+from playlist import get_playlist_tracks_cache_aware
 
 def get_date(spot_date):
     ''' returns date '''
@@ -138,29 +96,75 @@ def get_playlists(sp, query, total=60):
                 return
         it = sp.next(it)['playlists']
 
+@retry
+def get_new_likes(sp, cur_likes=[]):
+    offset = 0
+    it = sp.current_user_saved_tracks()
+    new_likes = []
+    print('[+] caching liked songs..')
+    while it['next']:
+        ptotal = it['total']
+        for r in it['items']:
+            tid = r['track']['id']
+            if tid in cur_likes:
+                print('[+] no more liked songs')
+                # break if we've reached our last liked songs
+                return new_likes
+            new_likes.append(tid)
+            offset += 1
+        it = sp.next(it)
+    if it.get('items'):
+        new_likes.extend([r['track']['id'] for r in it['items']])
+    return new_likes
+
 def main():
     ''' main sync '''
     sp = spotipy.Spotify(auth=token)
     # import bpdb; bpdb.set_trace()
-    pid = sys.argv[1].split('playlist/')[1].split("?")[0]
-    it = sp.user_playlist(0, pid)['tracks']
-    # print(it['items'])
+
+    try:
+        liked_tracks = pickle.load(open(CACHE_LIKES_FILENAME, 'rb'))
+    except:
+        print('[!] No liked trackes to load..')
+        liked_tracks = []
+    
+    new_likes = get_new_likes(sp, liked_tracks)
+    if new_likes:
+        print('[+] %d new likes' % len(new_likes))
+        liked_tracks.extend(new_likes)
+        pickle.dump(liked_tracks, open(CACHE_LIKES_FILENAME, 'wb'))
+
+    disliked = []
+    if len(sys.argv) == 3:
+        dislike_list_id = sys.argv[2]
+        print("[+] getting disliked songs from:", dislike_list_id)
+        disliked = get_playlist_tracks_cache_aware(sp, dislike_list_id)
+        print('[+] got %d disliked songs..' % len(disliked))
+
+    playlist_id = sys.argv[1].split('playlist/')[1].split("?")[0]
+    it = sp.user_playlist(0, playlist_id)['tracks']
     tracks = [a['track']['id'] for a in it['items']]
     pls = []
+    print('[+] processing...')
     def handle_json(l):
-        print('[+] processing: %d' % len(pls))
         path = os.path.join('playlists_cache', l)
         pltracks = json.loads(open(path, 'r').read())
         matches = 0
         for t in tracks:
-            if t in pltracks:
+            if t in disliked:
+                print('[+] dislike detected.. PUNISH!')
+                # matches -= 1
+            elif t in pltracks:
                 matches += 1
+                # print('[+] like detected.. matches++')
         pls.append((l, matches))
             
     with ThreadPool(8) as pool:
         pool.map(handle_json, os.listdir('playlists_cache/'))
 
-    above_thresh = filter(lambda x: x[1] > 5, pls)
+    print('[+] 0. %d pls' % len(pls))
+    above_thresh = list(filter(lambda x: x[1] > 3, pls))
+    print('[+] 0. %d above thresh' % len(above_thresh))
     matches = {}
     for l, m in above_thresh:
         path = os.path.join('playlists_cache', l)
@@ -173,106 +177,38 @@ def main():
                 matches[t] = 0
             matches[t] += 1
         
+    print('[+] 1. %d matches' % len(matches))
     s = sorted(matches.items(), key=lambda x: x[1], reverse=True)
+    print('[+] 2. %d s' % len(s))
     s = list(filter(lambda x: x[0] is not None, s))
-    s = list(filter(lambda x: x[1] > 4, s))
+    print('[+] 3. %d s' % len(s))
 
     cuser = sp.current_user()
     cid = cuser['id']
-    pl_name = f'based on: {pid}'
+    pl_name = f'based on: {playlist_id}'
     def divide_chunks(l, n):        
         # looping till length l
         for i in range(0, len(l), n):
             yield l[i:i + n]
-    # import bpdb; bpdb.set_trace()
+    tracks = []
+    for a in s:
+        t = sp.track(a[0])['id']
+        if t in liked_tracks:
+            print('[+] skipping liked track:', t)
+            continue
+        if t in disliked:
+            print('[+] skipping disliked track:', t)
+            continue
+        tracks.append(t)
+        if len(tracks) >= 100:
+            break
+    print('[+] 5. %d tracks' % len(s))
+    if len(tracks) == 0:
+        print('[!] no tracks found')
+        return
     pl = sp.user_playlist_create(cid, pl_name)
-    tracks = [sp.track(a[0])['id'] for a in s[:100]]
     sp.user_playlist_add_tracks(cid, pl['id'], tracks)
         
-
-    # try:
-    #     playlists_map = pickle.load(open(CACHE_PL_FILENAME, 'rb'))
-    # except:
-    #     print('[!] No synced trackes to load')
-    #     playlists_map = {}
-    # queries = [
-    #     'psytrance',
-    #     'psy trance',
-    #     'psychedelic trance',
-    #     'full on trance',
-    #     'progressive trance',
-    #     'hi tech trance',
-    #     'hitech trance',
-    #     'dark trance',
-    #     'dark psy',
-    #     'psydark',
-    #     'psycore',
-    # ]
-
-    # os.makedirs('playlists_cache', exist_ok=True)
-
-    # def normalize_pl(pl):
-    #     if 'total' in pl:
-    #         pass
-    #     return pl
-
-    # pindex = 0
-    # total_songs = [0]
-    # @retry
-    # def handle_playlist(args):
-    #     pindex, pl = args
-    #     oid = pl['owner']['id']
-    #     pid = pl['id']
-    #     path = os.path.join('playlists_cache', '%s.json' % (pid))
-    #     if pid in playlists_map or os.path.exists(path):
-    #         print('[+] %4d. already cached: %s' % (total_songs[0], pl['name']))
-    #         return
-    #     print('[+] %4d. caching: %s' % (total_songs[0], pl['name']))
-    #     it = sp.user_playlist_tracks(oid, pid)
-    #     tracks = []
-    #     while it['next']:
-    #         tracks.extend([t['track']['id'] for t in it['items']])
-    #         it = sp.next(it)
-    #     total_songs[0] += len(tracks)
-    #     playlists_map[pid] = tracks
-    #     open(path, 'w').write(json.dumps(tracks, indent=4))
-    
-    # with ThreadPool(32) as pool:
-    #     for q in queries:
-    #         try:
-    #             print('[+] Total Songs: %d' % total_songs[0])
-    #             print('[+] Query: %s' % q)
-    #             pool.map(handle_playlist, enumerate(get_playlists(sp, q, 1000)))
-    #             # pickle.dump(playlists_map, open(CACHE_PL_FILENAME, 'wb'))
-    #         except:
-    #             raise
-    #             continue
-    
-    # pickle.dump(playlists_map, open(CACHE_PL_FILENAME, 'wb'))
-        
-    # import bpdb; bpdb.set_trace()
-
-    # return
-    # print('-----------------------------')
-    # try:
-    #     synced_tracks = pickle.load(open(CACHE_TRACKS_FILENAME, 'rb'))
-    # except:
-    #     print('[!] No synced trackes to load')
-    #     synced_tracks = []
-    # new_tracks = [t for t in tracks if t not in synced_tracks]
-
-    # if not new_tracks:
-    #     print('[+] Did not found any new tracks. bye!')
-    #     return
-
-    # cuser = sp.current_user()
-    # cid = cuser['id']
-    # pl_name = datetime.now().strftime('Subs%Y%m%d%H%M%S')
-    # # pl = sp.user_playlist_create(cid, pl_name)
-    # sp.user_playlist_add_tracks(cid, pl['id'], new_tracks)
-
-    # print('[+] Caching %d newly found tracks' % (len(new_tracks)))
-    # pickle.dump(synced_tracks + new_tracks, open(CACHE_TRACKS_FILENAME, 'wb'))
 
 
 if __name__ == '__main__':
